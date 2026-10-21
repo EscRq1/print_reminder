@@ -1,4 +1,4 @@
-# print_remainder
+# print_reminder
 Use -h or --help to see the list of arguments <br />
 Use --mark-printed to set up the current date as the last printing date<br />
 Use --status to see info about the time and dates<br />

@@ -49,6 +49,15 @@ def save_config(path: Path, cfg: dict) -> None:
             temporary.unlink(missing_ok=True)
 
 
+def record_print(path: Path) -> str:
+    """Record a print now (same action as --mark-printed). Returns the UTC stamp."""
+    cfg = load_config(path)
+    cfg["last_print_utc"] = datetime.now(timezone.utc).isoformat()
+    cfg.setdefault("interval_days", DEFAULT_INTERVAL_DAYS)
+    save_config(path, cfg)
+    return cfg["last_print_utc"]
+
+
 def days_since_last_print(cfg: dict) -> float | None:
     raw = cfg.get("last_print_utc")
     if not raw:
@@ -71,7 +80,7 @@ def mark_command(path: Path) -> str:
     return shlex.join(args)
 
 
-def notify(title: str, message: str, command: str) -> None:
+def notify(title: str, message: str, command: str, path: Path) -> None:
     print(f"\n*** {title} ***\n{message}\n\n{command}\n", flush=True)
     try:
         import tkinter as tk
@@ -103,16 +112,62 @@ def notify(title: str, message: str, command: str) -> None:
 
     def copy_command() -> None:
         try:
-            window.clipboard_clear()
-            window.clipboard_append(command)
-            window.update_idletasks()
-            hint.set("Copied! Paste it into PowerShell after printing."
-                     if os.name == "nt" else
-                     "Copied! Paste into your terminal before closing this window.")
-        except tk.TclError as exc:
+            import subprocess
+            import sys
+
+            success = False
+
+            # Windows
+            if os.name == "nt":
+                subprocess.run("clip", input=command.encode("utf-8"), check=True)
+                success = True
+
+            else:
+                for tool in [
+                    ["xclip", "-selection", "clipboard"],
+                    ["xsel", "-b"],
+                    ["wl-copy"],
+                ]:
+                    try:
+                        subprocess.run(
+                            tool, input=command.encode("utf-8"), check=True, timeout=1
+                        )
+                        success = True
+                        break
+                    except (FileNotFoundError, subprocess.SubprocessError):
+                        continue
+
+            if not success:
+                window.clipboard_clear()
+                window.clipboard_append(command)
+                window.update()
+                hint.set(
+                    "Copied! (Keep window open—no system tool found)."
+                    if os.name != "nt"
+                    else "Copied!"
+                )
+            else:
+                hint.set(
+                    "Copied persistently! You can now close this window."
+                    if os.name == "nt"
+                    else "Copied persistently! You can close this window now."
+                )
+
+        except Exception as exc:
             hint.set(f"Could not copy: {exc}")
 
+    def mark_printed() -> None:
+        try:
+            stamp = record_print(path)
+        except OSError as exc:
+            hint.set(f"Could not save: {exc}")
+            return
+        hint.set(f"Marked as printed: {stamp}")
+        mark_button.configure(state="disabled")
+
     ttk.Button(buttons, text="Copy command", command=copy_command).pack(side="left")
+    mark_button = ttk.Button(buttons, text="Mark as printed", command=mark_printed)
+    mark_button.pack(side="left", padx=(8, 0))
     ttk.Button(buttons, text="Close", command=window.destroy).pack(side="right")
     window.bind("<Escape>", lambda event: window.destroy())
     window.update_idletasks()
@@ -164,10 +219,8 @@ def main() -> int:
         print(f"Interval set to {args.set_interval} days. State: {path}")
         return 0
     if args.mark_printed:
-        cfg["last_print_utc"] = datetime.now(timezone.utc).isoformat()
-        cfg.setdefault("interval_days", DEFAULT_INTERVAL_DAYS)
-        save_config(path, cfg)
-        print(f"Marked as printed: {cfg['last_print_utc']}\nState: {path}")
+        stamp = record_print(path)
+        print(f"Marked as printed: {stamp}\nState: {path}")
         return 0
 
     interval = cfg.get("interval_days", DEFAULT_INTERVAL_DAYS)
@@ -182,16 +235,26 @@ def main() -> int:
             state = "OK" if elapsed < interval else "OVERDUE"
             print(f"Last print: {elapsed:.1f} days ago | Interval: {interval} days | {state}")
         return 0
-    if elapsed is not None and elapsed < interval:
-        print(f"OK - last print {elapsed:.1f} days ago; {interval - elapsed:.1f} days remaining.")
-        return 0
-
-    reason = ("No previous print has been recorded" if elapsed is None else
-              f"{elapsed:.1f} days since last print (interval: {interval} days)")
+    
     shell = "PowerShell" if os.name == "nt" else "your terminal"
-    notify("Color printer needs a test print",
-           f"{reason}.\n\nPrint a color page, then run this command in {shell}:",
-           mark_command(path))
+
+
+    if elapsed is None:
+        title = "Color printer might need a test print"
+        reason = "No previous print has been recorded"
+        msg = f"{reason}.\n\nPrint a color page, click 'Mark as printed' or run this command in {shell}:" 
+        
+    elif elapsed is not None and elapsed > interval:
+        title = "Color printer needs a test print"
+        reason = f"{elapsed:.1f} days since last print (interval: {interval} days)"
+        msg = f"{reason}.\n\nPrint a color page, click 'Mark as printed' or run this command in {shell}:"
+
+    else:
+        title = "Reminder"
+        msg = f"Its a reminder window, either close it or set a new last-printed date\n\n{elapsed:.1f} days since last print (interval: {interval} days)"
+    
+    
+    notify(title, msg, mark_command(path), path)
     return 0
 
 
